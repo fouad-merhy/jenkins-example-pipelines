@@ -1,0 +1,66 @@
+pipeline {
+    agent{node {label 'master'}}
+    options { timestamps() }
+    stages{
+        stage ('Get New Changes'){
+            steps {
+                gitlabCommitStatus("Get New Changes"){
+                git branch: '<branch>', 
+                credentialsId: '<git_credentials>', 
+                url: '<repository_clone_url>'
+                }
+            }
+        }
+        stage ('Versioning'){
+            steps {
+                gitlabCommitStatus("Versioning"){
+                // version number will appear in the apk name
+                VersionNumber (projectStartDate: '2000-10-10', versionNumberString: '1.0.0.${BUILDS_ALL_TIME}', 
+                    versionPrefix: '<some_prefix>', 
+                    worstResultForIncrement: 'SUCCESS')
+                }
+            }
+        }
+        stage ('Build'){
+            steps {
+                gitlabCommitStatus("Build"){
+                /* build command will be executed in the jenkins workspace.
+                   Gradle path can be specified in the jenkins management console
+                    for multiple gradle version support*/ 
+                sh 'gradle assembleDebug'
+                }
+            }
+        }
+        // Create a downloadable artifact on the Jenkins pipeline page
+        stage ('Archive Artifact'){
+            steps {
+                gitlabCommitStatus("Archive Artifact"){
+                    archiveArtifacts allowEmptyArchive: true, 
+                        artifacts: 'build/outputs/apk/*', 
+                        onlyIfSuccessful: true
+                }
+            }
+        }
+        // Tests will run if the checkbox is ticked
+        if (params.RUN_TESTS == true){
+            stage('Test') {
+                steps {
+                    gitlabCommitStatus("Test"){
+                    sh 'gradle check --project-dir relative/path/to/app/dir'
+                    // Display test results on the Jenkins pipeline page
+                    androidLint pattern: 'build/reports/lint-results.xml'
+                    }
+                }
+            }
+        }
+    }
+    post {
+        // this postbuild action will send an email containing the build status and log to a list of addesses
+        always {
+            emailext attachLog: false,
+                body: '${DEFAULT_CONTENT}',
+                subject: '${DEFAULT_SUBJECT}',
+                to: '<list_of_emails>'
+        }
+    }
+}
