@@ -1,0 +1,26 @@
+stage('Robot Test'){
+    steps {
+        gitlabCommitStatus('Robot Test') {
+            dir('/path/to/dir/containing/robotfile'){
+                sh ' robot --nostatusrc Testing.robot'
+                step([
+                $class : 'RobotPublisher',
+                outputPath : ".",
+                outputFileName : "output.xml",
+                disableArchiveOutput : false,
+                passThreshold : 100,
+                unstableThreshold: 95.0,
+                onlyCritical : true,
+                otherFiles : "*.png",])
+                publishHTML([
+                    allowMissing: true, 
+                    alwaysLinkToLastBuild: true, 
+                    keepAll: true, 
+                    reportDir: '.', 
+                    reportFiles: 'report.html', 
+                    reportName: 'Robot Framework Report', 
+                    reportTitles: 'ROBOT'])
+            }
+        }
+    }
+}
