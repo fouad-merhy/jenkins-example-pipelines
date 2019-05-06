@@ -1,0 +1,135 @@
+pipeline {
+    agent{node {label 'master'}}
+    options { timestamps() }
+    stages{
+        stage ('Get Project Changes'){
+            steps {
+                gitlabCommitStatus('Get New Changes') {
+                    git branch: '<branch>',
+                    credentialsId: '<git_credentials>',
+                    url: '<Repository_clone_url>'
+                }
+            }
+        }
+        stage('Test') {
+            // This staged preforms static code analysis and displays the results on the jenkins job page
+            steps {
+                gitlabCommitStatus('Test') {
+                    sh 'sudo gradle clean test findBugsMain pmdMain'
+                    sh 'sudo chown -R jenkins:jenkins .'
+
+                    junit allowEmptyResults: true,
+                        testResults: 'build/test-results/test/*.xml'
+
+                    pmd canComputeNew: true,
+                        defaultEncoding: '',
+                        healthy: '',
+                        pattern: 'build/reports/pmd/main.xml',
+                        unHealthy: ''
+
+                    findbugs canComputeNew: true,
+                        defaultEncoding: '',
+                        healthy: '',
+                        pattern: 'build/reports/findbugs/main.xml',
+                        unHealthy: ''  
+                }
+            }
+        }
+        stage('Build') {
+            // Build and unzip the war file in order to upload the changes only
+            steps {
+                gitlabCommitStatus('Build') {
+                    sh 'sudo gradle war'
+                    sh 'sudo unzip build/libs/<compressed_warfile> -d build/libs/ '
+                    sh 'sudo chown -R jenkins:jenkins .'
+                }
+            }
+        }
+        stage('Sync and Clean') {
+            // Sync the changes with a temp directory on the application server(s)
+            steps {
+                gitlabCommitStatus('Sync and Clean') {
+                    sh 'rsync -avh build/libs/WEB-INF/lib/ jenkins@<app_server_ip>:${JENKINS_WARFILES_DIR}/<directory.war>/WEB-INF/lib/ --delete'
+                    // sh 'rsync -avh build/libs/WEB-INF/lib/ jenkins@<another_app_server_ip>:${JENKINS_WARFILES_DIR}/<directory.war>/WEB-INF/lib/ --delete'
+                }
+            }
+        }
+        stage('Deployment') {
+            parallel {
+                stage('Deploy on APP1'){
+                    agent{node {label '<app_server_label>'}}
+                    steps {
+                        gitlabCommitStatus('Deploy on APP1') {
+                            // copy centralized application configuration files
+                        configFileProvider([
+                            configFile(fileId: '<application.properties_file_id>', targetLocation: '${JENKINS_WARFILES_DIR}/<directory.war>/WEB-INF/classes/application.properties', variable: 'APPLICATION_PROPERTIES'),
+                            configFile(fileId: '<log4j.properties_file_id>', targetLocation: '${JENKINS_WARFILES_DIR}/<directory.war>/WEB-INF/classes/log4j.properties', variable: 'LOG4J_PROPERTIES'), 
+                            configFile(fileId: '<module.properties_file_id>', targetLocation: '${JENKINS_WARFILES_DIR}/<directory.war>/WEB-INF/classes/module.properties', variable: 'MODULE_PROPERTIES')])
+                            {   
+                                /* This script can be put in an .sh file on the application server and run using jenkins
+                                
+                                Description: 
+                                1- take a complete backup of the running war file,
+                                2- sync the changes to the war file
+                                3- adjust permissions
+                                4- deploy new war file using .dodeploy
+                                5- check if the deployment is successfull
+                                6- if the deployment fails:
+                                    - redeploy the old version
+                                    - fail the job 
+                                */
+                                sh 'cp -r ${WILDFLY_DEPLOYMENT_DIR}/<directory.war> ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>.backup'
+                                sh 'sudo rsync -avh ${JENKINS_WARFILES_DIR}/<directory.war>/WEB-INF/lib/ ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>/WEB-INF/lib/ --delete' 
+                                sh 'sudo rsync -avh ${JENKINS_WARFILES_DIR}/<directory.war>/WEB-INF/classes/ ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>/WEB-INF/classes/'
+
+                                sh 'sudo chown -R wildfly:wildfly ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>'
+                                sh 'sudo find ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>/WEB-INF/lib/ -type d -exec chmod 775 {} \\;'
+                                sh 'sudo find ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>/WEB-INF/lib/ -type f -exec chmod 664 {} \\;'
+
+                                sh 'touch <directory.war>.dodeploy'
+                                sh 'sudo mv <directory.war>.dodeploy ${WILDFLY_DEPLOYMENT_DIR}/'
+                                sh '''
+                                #!/bin/bash
+                                    sleep 5
+                                    while [ -f "${WILDFLY_DEPLOYMENT_DIR}/<directory.war>.isdeploying" ]
+                                    do
+                                        sleep 3
+                                        echo "Waiting for deployment"
+                                    done
+                                    while :
+                                    do
+                                        if [ -f "${WILDFLY_DEPLOYMENT_DIR}/<directory.war>.deployed" ]; then
+                                            echo "DEPLOYMENT SUCCESS"
+                                            rm -rf ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>.backup
+                                            break
+                                        elif [ -f "${WILDFLY_DEPLOYMENT_DIR}/<directory.war>.failed" ]; then
+                                            cat ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>.failed
+                                            rm -rf ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>
+                                            cp -r ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>.backup ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>
+                                            sudo chown -R wildfly:wildfly ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>
+                                            touch ${WILDFLY_DEPLOYMENT_DIR}/<directory.war>.dodeploy
+                                            echo "DEPLOYMENT FAILED"
+                                            exit 1
+                                        else
+                                            echo "Waiting for deployment"
+                                            sleep 3
+                                        fi
+                                    done
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        // this postbuild action will send an email containing the build status and log to a list of addesses
+        always {
+            emailext attachLog: true,
+                body: '${DEFAULT_CONTENT} WILDFLY DEPLOYMENT COMPLETE',
+                subject: '${DEFAULT_SUBJECT}',
+                to: '<list_of_emails>'
+        }
+    }
+}
